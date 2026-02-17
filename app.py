@@ -1,0 +1,101 @@
+from flask import Flask, render_template, jsonify, send_from_directory, request
+import psycopg2
+import os
+
+app = Flask(__name__)
+
+# --- CONFIGURACIÓN DE BASE DE DATOS ---
+DB_CONFIG = {
+    "dbname": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_Aij1bfWkU4ey",
+    "host": "ep-silent-water-aids3dgm-pooler.c-4.us-east-1.aws.neon.tech",
+    "port": "5432",
+    "sslmode": "require"
+}
+
+# Ruta para servir las fotos de los alumnos
+@app.route('/fotos/<path:filename>')
+def serve_foto(filename):
+    return send_from_directory('fotos', filename)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/alumno/<nfc_uid>')
+def obtener_alumno(nfc_uid):
+    # Recibimos la puerta seleccionada en el HTML (Licenciatura, Bachillerato o Vehicular)
+    nombre_puerta = request.args.get('puerta', 'Acceso Desconocido') 
+    conn = None
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        
+        # CONSULTA COMPLETA: Incluye datos personales, mensaje y los 2 vehículos
+        query = """SELECT matricula, nombre, carrera, campus, estatus, foto, mensaje_personalizado,
+                          vehiculo1_tipo, vehiculo1_placa, vehiculo1_modelo, vehiculo1_color,
+                          vehiculo2_tipo, vehiculo2_placa, vehiculo2_modelo, vehiculo2_color,
+                          tiene_vehiculo
+                   FROM estudiantes WHERE nfc_uid = %s"""
+        
+        cur.execute(query, (nfc_uid.strip(),))
+        row = cur.fetchone()
+
+        if row:
+            # Validar estatus para el historial
+            estatus_str = str(row[4]).lower() if row[4] else ""
+            
+            # Si el alumno está Activo o es un mensaje Personalizado, registramos la entrada
+            if "activo" in estatus_str or "personalizado" in estatus_str:
+                try:
+                    cur.execute("INSERT INTO historial_acceso (matricula, puerta) VALUES (%s, %s)", (row[0], nombre_puerta))
+                    conn.commit()
+                except Exception as e_hist:
+                    print(f"Error guardando historial: {e_hist}")
+                    conn.rollback()
+
+            # Estructura de respuesta para el HTML
+            response = {
+                "found": True,
+                "matricula": row[0], 
+                "nombre": row[1], 
+                "carrera": row[2],
+                "campus": row[3], 
+                "estatus": row[4], 
+                "foto": row[5], 
+                "mensaje": row[6],
+                # DATOS DEL VEHÍCULO 1
+                "v1": {
+                    "tipo": row[7] if row[7] else "", 
+                    "placa": row[8] if row[8] else "", 
+                    "modelo": row[9] if row[9] else "", 
+                    "color": row[10] if row[10] else ""
+                },
+                # DATOS DEL VEHÍCULO 2
+                "v2": {
+                    "tipo": row[11] if row[11] else "", 
+                    "placa": row[12] if row[12] else "", 
+                    "modelo": row[13] if row[13] else "", 
+                    "color": row[14] if row[14] else ""
+                },
+                # Interruptor para mostrar o no la sección naranja en el HTML
+                "tiene_vehiculo": row[15] if row[15] is not None else False
+            }
+            cur.close()
+            return jsonify(response)
+        
+        cur.close()
+        return jsonify({"found": False})
+
+    except Exception as e:
+        print(f"ERROR CRÍTICO EN APP.PY: {e}")
+        return jsonify({"error": str(e)})
+        
+    finally:
+        if conn:
+            conn.close()
+
+if __name__ == '__main__':
+    # El host 0.0.0.0 permite que otras computadoras de la red vean la página
+    app.run(host='0.0.0.0', port=5000)
